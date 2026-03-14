@@ -112,9 +112,8 @@ export default function JobDetailPage() {
         email:     inviteForm.email,
       });
       // Send invite
-      await api.invites.send({ job_id: id, candidate_id: candidate.id });
-      showToast('✓ Interview invite sent!');
-      setShowInvite(false);
+      const result = await api.invites.send({ job_id: id, candidate_id: candidate.id });
+      setInviteLink(result.interview_url);
       setInviteForm({ full_name: '', email: '' });
       loadJob();
     } catch (e) { showToast(e.message || 'Failed to send invite'); }
