@@ -77,11 +77,29 @@ export default function JobDetailPage() {
     setQuestions(q.grouped || {});
   };
 
+  const [pauseConfirm, setPauseConfirm] = useState(null);
+  const [pausing, setPausing] = useState(false);
+
   const handleStatusChange = async (status) => {
+    if (status === 'paused') {
+      const pending = await api.jobs.pendingInvites(id);
+      if (pending.count > 0) { setPauseConfirm(pending); return; }
+    }
     await api.jobs.setStatus(id, status);
     const j = await api.jobs.get(id);
     setJob(j.job);
     showToast(`✓ Job status: ${status}`);
+  };
+
+  const handlePauseAndNotify = async () => {
+    setPausing(true);
+    try {
+      const result = await api.invites.pauseAndNotify(id);
+      setPauseConfirm(null);
+      showToast(`✓ ${result.message}`);
+      loadJob();
+    } catch (e) { showToast(e.message); }
+    setPausing(false);
   };
 
   const handleSendInvite = async (e) => {
@@ -402,6 +420,38 @@ export default function JobDetailPage() {
         </div>
       )}
 
+
+      {/* Pause Confirmation Modal */}
+      {pauseConfirm && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
+          <div className="card animate-fadeUp" style={{ width:480, padding:36 }}>
+            <div style={{ fontSize:20, fontWeight:700, fontFamily:'Syne,sans-serif', marginBottom:8, color:'var(--navy)' }}>
+              ⚠️ Pause Recruitment?
+            </div>
+            <p style={{ color:'var(--muted)', fontSize:14, lineHeight:1.6, marginBottom:20 }}>
+              There are <strong style={{color:'var(--red)'}}>{pauseConfirm.count} candidate{pauseConfirm.count !== 1 ? 's' : ''}</strong> with pending interview invites for this job.
+            </p>
+            {pauseConfirm.candidates?.length > 0 && (
+              <div style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:8, padding:14, marginBottom:20, maxHeight:150, overflowY:'auto' }}>
+                {pauseConfirm.candidates.map((c, i) => (
+                  <div key={i} style={{ fontSize:13, padding:'4px 0', color:'var(--text2)' }}>
+                    • {c?.full_name} — {c?.email}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ background:'var(--amber-bg)', border:'1px solid #FDE68A', borderRadius:8, padding:'12px 16px', marginBottom:24, fontSize:13, color:'var(--amber-text)' }}>
+              If you proceed, all pending invite links will be <strong>deactivated</strong> and each candidate will receive an email notifying them that the recruitment has been paused.
+            </div>
+            <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setPauseConfirm(null)}>Cancel</button>
+              <button className="btn btn-danger" onClick={handlePauseAndNotify} disabled={pausing}>
+                {pausing ? <span className="spinner spinner-dark" /> : `Pause & Notify ${pauseConfirm.count} Candidate${pauseConfirm.count !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Toast */}
       {toast && (
         <div className="toast-wrap">
