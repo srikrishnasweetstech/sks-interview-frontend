@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 import './index.css';
-
+    
 import Layout        from './components/layout/Layout.jsx';
 import LoginPage     from './pages/LoginPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
