@@ -28,7 +28,7 @@ export default function JobDetailPage() {
   const [editId, setEditId]         = useState(null);
   const [editText, setEditText]     = useState('');
   const [showInvite, setShowInvite] = useState(false);
-  const [inviteForm, setInviteForm] = useState({ full_name: '', email: '' });
+  const [inviteForm, setInviteForm] = useState({ full_name: '', email: '', scheduled_at: '', duration_minutes: 45 });
   const [sending, setSending]       = useState(false);
   const [inviteLink, setInviteLink] = useState('');
   const [pauseConfirm, setPauseConfirm] = useState(null);
@@ -125,7 +125,12 @@ export default function JobDetailPage() {
         full_name: inviteForm.full_name,
         email:     inviteForm.email,
       });
-      const result = await api.invites.send({ job_id: id, candidate_id: candidate.id });
+      const result = await api.invites.send({ 
+        job_id: id, 
+        candidate_id: candidate.id,
+        scheduled_at: inviteForm.scheduled_at ? new Date(inviteForm.scheduled_at).toISOString() : null,
+        duration_minutes: inviteForm.duration_minutes || 45,
+      });
       setInviteLink(result.interview_url);
       loadJob();
     } catch (e) {
@@ -366,8 +371,21 @@ export default function JobDetailPage() {
                   <input className="input" type="email" placeholder="candidate@email.com" required
                     value={inviteForm.email} onChange={e => setInviteForm(p => ({...p, email: e.target.value}))} />
                 </div>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+                  <div>
+                    <label className="label">Scheduled Date & Time (optional)</label>
+                    <input className="input" type="datetime-local"
+                      value={inviteForm.scheduled_at} onChange={e => setInviteForm(p => ({...p, scheduled_at: e.target.value}))} />
+                    <div style={{ fontSize:11, color:'var(--muted)', marginTop:4 }}>Link opens 10 min before</div>
+                  </div>
+                  <div>
+                    <label className="label">Duration (minutes)</label>
+                    <input className="input" type="number" min={15} max={120}
+                      value={inviteForm.duration_minutes} onChange={e => setInviteForm(p => ({...p, duration_minutes: parseInt(e.target.value)}))} />
+                  </div>
+                </div>
                 <div style={{ background:'var(--amber-bg)', border:'1px solid #FDE68A', borderRadius:7, padding:'10px 14px', fontSize:12, color:'var(--amber-text)' }}>
-                  ⏰ Link expires in 48 hours.
+                  ⏰ If no time set, link is valid for 48 hours from now.
                 </div>
                 <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
                   <button type="button" className="btn btn-ghost" onClick={() => setShowInvite(false)}>Cancel</button>
