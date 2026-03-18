@@ -144,8 +144,10 @@ export default function InterviewPage() {
   const [retryAnswer,      setRetryAnswer]       = useState(null);
   const [networkError,     setNetworkError]      = useState('');
   const [startError,       setStartError]        = useState('');
-  const [showTextInput,    setShowTextInput]     = useState(true);  // visible by default — voice is unreliable across networks
+  const [showTextInput,    setShowTextInput]     = useState(true);  // visible by default
   const [textInput,        setTextInput]         = useState('');
+  const [durationMinutes,  setDurationMinutes]   = useState(45);  // set from /start response
+  const [timeWarned,       setTimeWarned]        = useState(false); // 5-min warning fired?
 
   // Refs
   const videoRef      = useRef(null);
@@ -160,9 +162,15 @@ export default function InterviewPage() {
   const sequenceRef   = useRef(2);
   const sessionRef    = useRef(null);
   const elapsedRef    = useRef(0);
-  const sendingRef    = useRef(false); // prevents double-send race
-  const aiStatusRef   = useRef('idle'); // always current, prevents stale closure in mic guard
-  const stopListeningRef = useRef(null); // populated by startListening, called by stopListening
+  const sendingRef    = useRef(false);
+  const aiStatusRef   = useRef('idle');
+  const stopListeningRef = useRef(null);
+  // Duration / inactivity tracking
+  const durationRef         = useRef(45);    // minutes — synced from state
+  const timeWarnedRef       = useRef(false); // prevents double-firing
+  const timeUpFiredRef      = useRef(false);
+  const lastActivityRef     = useRef(Date.now()); // updated on every sendAnswer
+  const inactivityTimerRef  = useRef(null);  // checks every 30s for silence
 
   // Keep refs in sync with state
   useEffect(() => { ttsMutedRef.current = ttsMuted; }, [ttsMuted]);
@@ -170,6 +178,7 @@ export default function InterviewPage() {
   useEffect(() => { sessionRef.current  = sessionId; }, [sessionId]);
   useEffect(() => { elapsedRef.current  = elapsed; }, [elapsed]);
   useEffect(() => { aiStatusRef.current = aiStatus; }, [aiStatus]);
+  useEffect(() => { durationRef.current = durationMinutes; }, [durationMinutes]);
 
   // ── Init
   useEffect(() => {
@@ -209,6 +218,112 @@ export default function InterviewPage() {
     }, 30000);
     return () => clearInterval(ka);
   }, [sessionId, phase]);
+
+  // ── Duration enforcement: warn at (duration - 5) minutes, end at duration
+  useEffect(() => {
+    if (phase !== 'interview' || !sessionId) return;
+
+    const checkTimer = setInterval(() => {
+      const elapsedSec = elapsedRef.current;
+      const limitSec   = durationRef.current * 60;
+      const sid        = sessionRef.current;
+      const seq        = sequenceRef.current;
+      if (!sid) return;
+
+      // 5-minute warning
+      if (!timeWarnedRef.current && elapsedSec >= limitSec - 300) {
+        timeWarnedRef.current = true;
+        setTimeWarned(true);
+        // Send TIME_WARNING signal to Aria — she will wrap up gracefully
+        api.interview.message({
+          session_id:       sid,
+          candidate_answer: 'TIME_WARNING: You have 5 minutes remaining. Please start wrapping up the current topic and move toward HR essentials and closing.',
+          sequence:         seq,
+        }).then(r => {
+          setTranscript(p => [...p, { role:'ai', text: r.ai_message }]);
+          setAiText(r.ai_message);
+          aiStatusRef.current = 'speaking';
+          setAiStatus('speaking');
+          speak(r.ai_message, () => { aiStatusRef.current = 'idle'; setAiStatus('idle'); }, ttsMutedRef.current);
+          sequenceRef.current = r.sequence + 1;
+          setSequence(r.sequence + 1);
+          if (r.is_complete) setTimeout(endInterviewDirect, 2000);
+        }).catch(() => {});
+      }
+
+      // Time is up
+      if (!timeUpFiredRef.current && elapsedSec >= limitSec) {
+        timeUpFiredRef.current = true;
+        // Send TIME_UP signal — Aria immediately closes the interview
+        api.interview.message({
+          session_id:       sid,
+          candidate_answer: 'TIME_UP: The interview time has ended. Please immediately go to the closing phase and say goodbye.',
+          sequence:         sequenceRef.current,
+        }).then(r => {
+          setTranscript(p => [...p, { role:'ai', text: r.ai_message }]);
+          setAiText(r.ai_message);
+          aiStatusRef.current = 'speaking';
+          setAiStatus('speaking');
+          speak(r.ai_message, () => {
+            aiStatusRef.current = 'idle';
+            setAiStatus('idle');
+            // Auto-complete 3s after Aria's closing message
+            setTimeout(endInterviewDirect, 3000);
+          }, ttsMutedRef.current);
+          sequenceRef.current = r.sequence + 1;
+          setSequence(r.sequence + 1);
+        }).catch(() => {
+          // Even if the API fails, still end the interview
+          setTimeout(endInterviewDirect, 3000);
+        });
+      }
+    }, 10000); // check every 10s
+
+    return () => clearInterval(checkTimer);
+  }, [phase, sessionId]);
+
+  // ── Inactivity detection: if candidate hasn't responded in 90s, Aria checks in
+  useEffect(() => {
+    if (phase !== 'interview' || !sessionId) return;
+
+    // Reset activity timestamp on every sendAnswer (see sendAnswer below)
+    lastActivityRef.current = Date.now();
+    let nudgeCount = 0;
+
+    const inactivityCheck = setInterval(() => {
+      const sid = sessionRef.current;
+      const seq = sequenceRef.current;
+      if (!sid) return;
+      // Don't nudge if Aria is already speaking/thinking or sending
+      if (aiStatusRef.current !== 'idle') {
+        lastActivityRef.current = Date.now(); // Aria active = not idle
+        nudgeCount = 0;
+        return;
+      }
+      const silentSeconds = (Date.now() - lastActivityRef.current) / 1000;
+      if (silentSeconds >= 90) {
+        nudgeCount++;
+        lastActivityRef.current = Date.now(); // reset so we don't fire every 10s
+        const signal = nudgeCount === 1 ? 'CANDIDATE_SILENT' : 'CANDIDATE_INACTIVE';
+        api.interview.message({
+          session_id:       sid,
+          candidate_answer: `${signal}: The candidate has been silent for ${Math.round(silentSeconds)} seconds.`,
+          sequence:         seq,
+        }).then(r => {
+          setTranscript(p => [...p, { role:'ai', text: r.ai_message }]);
+          setAiText(r.ai_message);
+          aiStatusRef.current = 'speaking';
+          setAiStatus('speaking');
+          speak(r.ai_message, () => { aiStatusRef.current = 'idle'; setAiStatus('idle'); }, ttsMutedRef.current);
+          sequenceRef.current = r.sequence + 1;
+          setSequence(r.sequence + 1);
+        }).catch(() => {});
+      }
+    }, 10000);
+
+    inactivityTimerRef.current = inactivityCheck;
+    return () => clearInterval(inactivityCheck);
+  }, [phase, sessionId]);
 
   // ── Proctoring: track tab visibility changes
   useEffect(() => {
@@ -359,6 +474,7 @@ export default function InterviewPage() {
       setIsRejoin(!!res.is_rejoin);
       if (res.punctuality_score != null) setPunctuality(res.punctuality_score);
       if (res.is_rejoin) setSequence(res.sequence || 2);
+      if (res.duration_minutes) { setDurationMinutes(res.duration_minutes); durationRef.current = res.duration_minutes; }
       setTranscript([{ role:'ai', text: res.ai_message }]);
       setAiText(res.ai_message);
 
@@ -397,6 +513,7 @@ export default function InterviewPage() {
     }
 
     sendingRef.current = true;
+    lastActivityRef.current = Date.now(); // reset inactivity timer
     const seq = sequenceRef.current;
     sequenceRef.current += 2;
     setSequence(seq + 2);
@@ -893,6 +1010,15 @@ export default function InterviewPage() {
           <div style={{ width:7, height:7, background:C.red, borderRadius:'50%', animation:'pulse 1.2s infinite' }} />
           <span style={{ fontFamily:'monospace', fontSize:mobile?11:12, color:C.red }}>LIVE</span>
           <span style={{ fontFamily:'monospace', fontSize:mobile?12:13, background:'#141419', border:'1px solid #ffffff18', padding:'3px 10px', borderRadius:6 }}>{fmt(elapsed)}</span>
+          {/* Time remaining indicator */}
+          {(() => {
+            const remaining = durationMinutes * 60 - elapsed;
+            const isWarning = remaining <= 300 && remaining > 0;
+            const isOver    = remaining <= 0;
+            if (isOver) return <span style={{ fontFamily:'monospace', fontSize:10, color:C.red, background:'rgba(255,79,79,0.12)', padding:'3px 8px', borderRadius:4 }}>TIME UP</span>;
+            if (isWarning) return <span style={{ fontFamily:'monospace', fontSize:10, color:C.amber, background:'rgba(245,158,11,0.12)', padding:'3px 8px', borderRadius:4 }}>⏱ {fmt(remaining)} left</span>;
+            return <span style={{ fontFamily:'monospace', fontSize:10, color:'#555', padding:'3px 8px' }}>{fmt(remaining)} left</span>;
+          })()}
           <button onClick={() => { setTtsMuted(m => { const n=!m; if(n) window.speechSynthesis.cancel(); return n; }); }}
             title={ttsMuted?'Unmute Aria':'Mute Aria'}
             style={{ padding:'3px 9px', background:'#141419', border:'1px solid #ffffff18', borderRadius:6, color:ttsMuted?C.amber:'#6B6876', fontSize:10, cursor:'pointer', fontFamily:'monospace' }}>
