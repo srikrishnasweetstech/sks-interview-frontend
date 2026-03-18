@@ -142,7 +142,9 @@ export default function InterviewPage() {
   const [endingInterview,  setEndingInterview]   = useState(false);
   const [retryAnswer,      setRetryAnswer]       = useState(null);
   const [networkError,     setNetworkError]      = useState('');
-  const [startError,       setStartError]        = useState(''); // error during startInterview — shows retry not dead screen
+  const [startError,       setStartError]        = useState('');
+  const [showTextInput,    setShowTextInput]     = useState(false); // fallback text input
+  const [textInput,        setTextInput]         = useState('');
 
   // Refs
   const videoRef      = useRef(null);
@@ -431,9 +433,17 @@ export default function InterviewPage() {
   };
 
   // ─────────────────────────────────────────────────────────
-  // Microphone — phrase-by-phrase restart with permission check
+  // Microphone — phrase-by-phrase with lang fallback
+  //
+  // KEY LESSONS from debugging:
+  // 1. Don't call getUserMedia({audio}) then immediately start SR —
+  //    Chrome's audio subsystem hasn't released the mic fully, causing
+  //    the first SR phrase to get an empty buffer → no-speech error.
+  //    Permission is already granted from the camera check step.
+  // 2. 'en-IN' routes to Google's Indian speech servers which can be
+  //    unreliable. After 3 no-speech errors we fall back to 'en-US'.
   // ─────────────────────────────────────────────────────────
-  const startListening = async () => {
+  const startListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setMicError('Voice input requires Google Chrome. Please open this link in Chrome.');
@@ -442,39 +452,20 @@ export default function InterviewPage() {
     if (aiStatusRef.current !== 'idle' || sendingRef.current) return;
 
     setMicError(''); setNetworkError(''); setRetryAnswer(null);
-
-    // ── Step 1: verify mic permission explicitly before starting recognition.
-    // This surfaces a clear error if the mic is blocked or held by another app.
-    try {
-      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // Release the test stream immediately — Web Speech API needs the mic free
-      testStream.getTracks().forEach(t => t.stop());
-    } catch (permErr) {
-      if (permErr.name === 'NotAllowedError') {
-        setMicError('Microphone access denied. Click the 🔒 or 🎙 icon in your browser address bar and allow microphone, then reload.');
-      } else if (permErr.name === 'NotFoundError') {
-        setMicError('No microphone found. Please connect one and try again.');
-      } else {
-        setMicError(`Microphone unavailable: ${permErr.message}. Check that no other app is using it.`);
-      }
-      return;
-    }
-
     setIsListening(true); setInterim(''); lastAnswer.current = '';
 
     const isActiveRef = { current: true };
-    let sendTimer = null;
-    let noSpeechCount = 0; // consecutive no-speech counter
+    let sendTimer     = null;
+    let noSpeechCount = 0;
+    let useLang       = 'en-IN'; // will fall back to en-US after 3 failures
 
     const scheduleSend = () => {
       clearTimeout(sendTimer);
       sendTimer = setTimeout(() => {
         if (lastAnswer.current.trim().length > 2) {
           isActiveRef.current = false;
-          setIsListening(false);
-          setInterim('');
-          const ans = lastAnswer.current.trim();
-          lastAnswer.current = '';
+          setIsListening(false); setInterim('');
+          const ans = lastAnswer.current.trim(); lastAnswer.current = '';
           sendAnswer(ans);
         }
       }, 2500);
@@ -486,11 +477,11 @@ export default function InterviewPage() {
       const recog = new SR();
       recog.continuous      = false;
       recog.interimResults  = true;
-      recog.lang            = 'en-IN';
+      recog.lang            = useLang;
       recog.maxAlternatives = 1;
 
       recog.onresult = (e) => {
-        noSpeechCount = 0; // reset on any result
+        noSpeechCount = 0;
         let fin = '', intr = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           if (e.results[i].isFinal) fin += e.results[i][0].transcript + ' ';
@@ -506,35 +497,42 @@ export default function InterviewPage() {
       };
 
       recog.onend = () => {
-        if (isActiveRef.current) setTimeout(startOnePhrase, 150);
+        if (isActiveRef.current) setTimeout(startOnePhrase, 120);
       };
 
       recog.onerror = (e) => {
-        console.warn('Speech error:', e.error, '| captured:', JSON.stringify(lastAnswer.current));
+        console.warn('SR error:', e.error, 'lang:', useLang, 'count:', noSpeechCount);
 
         if (e.error === 'no-speech') {
           noSpeechCount++;
-          // After 6 consecutive silent phrases (~9s), stop and tell the user
-          if (noSpeechCount >= 6) {
+          // After 3 no-speech on en-IN, switch to en-US (more reliable globally)
+          if (noSpeechCount === 3 && useLang === 'en-IN') {
+            console.log('Switching speech lang to en-US');
+            useLang = 'en-US';
+          }
+          // After 8 total no-speech errors, stop and tell user
+          if (noSpeechCount >= 8) {
             isActiveRef.current = false;
             clearTimeout(sendTimer);
             setIsListening(false); setInterim('');
-            setMicError(
-              'Your microphone is not picking up any audio. Please check:\n' +
-              '1. Mic is not muted (check keyboard mute key)\n' +
-              '2. Correct mic is selected — click 🔒 in address bar → Microphone\n' +
-              '3. No other app (Zoom, Teams, Meet) is holding the mic\n' +
-              '4. Try refreshing the page'
-            );
+            setMicError('Speech recognition is not receiving audio. Please tap 🎙 again. If this keeps happening, try: refresh the page, use a headset, or type your answer instead.');
             return;
           }
-          if (isActiveRef.current) setTimeout(startOnePhrase, 300);
+          if (isActiveRef.current) setTimeout(startOnePhrase, 200);
           return;
         }
 
         if (e.error === 'aborted') return;
 
-        // Network or other real error
+        if (e.error === 'network') {
+          // Network error from Google speech servers — retry a few times silently
+          noSpeechCount++;
+          if (noSpeechCount < 4 && isActiveRef.current) {
+            setTimeout(startOnePhrase, 500);
+            return;
+          }
+        }
+
         isActiveRef.current = false;
         clearTimeout(sendTimer);
         setIsListening(false); setInterim('');
@@ -542,7 +540,11 @@ export default function InterviewPage() {
         if (ans.length > 2) {
           sendAnswer(ans);
         } else {
-          setMicError(MIC_ERRORS[e.error] || `Mic error (${e.error}). Please try again.`);
+          setMicError(
+            e.error === 'network'
+              ? 'Network error reaching Google speech servers. Check your internet connection and try again.'
+              : MIC_ERRORS[e.error] || `Mic error (${e.error}). Please try again.`
+          );
         }
       };
 
@@ -550,6 +552,7 @@ export default function InterviewPage() {
       try {
         recog.start();
       } catch (err) {
+        // start() throws InvalidStateError if called while already running
         console.error('recog.start():', err.message);
         if (isActiveRef.current) setTimeout(startOnePhrase, 400);
       }
@@ -1005,36 +1008,75 @@ export default function InterviewPage() {
       )}
 
       {/* ── BOTTOM BAR */}
-      <div style={{ borderTop:'1px solid #ffffff0C', padding:mobile?'12px 16px':'12px 24px', display:'flex', alignItems:'center', justifyContent:'space-between', background:'rgba(6,6,10,0.97)', gap:12, flexShrink:0 }}>
-        <button onClick={requestEnd} disabled={endingInterview}
-          style={{ padding:mobile?'8px 12px':'8px 18px', borderRadius:7, border:'1px solid rgba(255,79,79,0.3)', background:'rgba(255,79,79,0.08)', color:C.red, fontSize:mobile?12:13, cursor:endingInterview?'not-allowed':'pointer', whiteSpace:'nowrap', opacity:endingInterview?0.5:1 }}>
-          {mobile ? 'End' : 'End Interview'}
-        </button>
+      <div style={{ borderTop:'1px solid #ffffff0C', background:'rgba(6,6,10,0.97)', flexShrink:0 }}>
 
-        <div style={{ textAlign:'center', flex:1 }}>
-          <button
-            style={{ width:mobile?48:54, height:mobile?48:54, borderRadius:'50%', border:'none', cursor:aiStatus!=='idle'||sendingRef.current?'not-allowed':'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:mobile?20:22, transition:'all 0.2s', opacity:aiStatus!=='idle'?0.35:1, background:isListening?C.red:'#1A1A22', boxShadow:isListening?'0 0 0 8px rgba(255,79,79,0.15)':'none', margin:'0 auto' }}
-            onClick={isListening ? stopListening : startListening}
-            disabled={aiStatus !== 'idle'}
-            className={isListening ? 'mic-active' : ''}>
-            {isListening ? '⏹' : '🎙'}
-          </button>
-          <div style={{ fontSize:11, color:'#6B6876', marginTop:6 }}>
-            {aiStatus==='speaking' ? 'Wait for Aria to finish...'
-             : aiStatus==='thinking' ? 'Aria is thinking...'
-             : isListening ? <strong style={{ color:'#EEEAE0' }}>Speaking… tap ⏹ or pause to send</strong>
-             : 'Tap 🎙 then speak your answer'}
+        {/* Text input fallback */}
+        {showTextInput && (
+          <div style={{ padding:'10px 16px', borderBottom:'1px solid #ffffff0C', display:'flex', gap:8 }}>
+            <input
+              style={{ flex:1, background:'#1A1A22', border:'1px solid #333', borderRadius:8, padding:'10px 14px', color:'#EEEAE0', fontSize:14, fontFamily:'inherit', outline:'none' }}
+              placeholder="Type your answer here..."
+              value={textInput}
+              onChange={e => setTextInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey && textInput.trim()) {
+                  e.preventDefault();
+                  const ans = textInput.trim();
+                  setTextInput('');
+                  sendAnswer(ans);
+                }
+              }}
+              disabled={aiStatus !== 'idle'}
+              autoFocus
+            />
+            <button
+              onClick={() => { if (textInput.trim()) { const ans=textInput.trim(); setTextInput(''); sendAnswer(ans); } }}
+              disabled={aiStatus !== 'idle' || !textInput.trim()}
+              style={{ padding:'10px 18px', background:textInput.trim()&&aiStatus==='idle'?C.gold:'#222', border:'none', borderRadius:8, color:textInput.trim()&&aiStatus==='idle'?'#000':'#555', fontWeight:700, fontSize:14, cursor:textInput.trim()&&aiStatus==='idle'?'pointer':'not-allowed', fontFamily:"'Syne',sans-serif", whiteSpace:'nowrap' }}>
+              Send →
+            </button>
           </div>
-        </div>
+        )}
 
-        <div style={{ textAlign:'right', minWidth:mobile?60:90 }}>
-          <div style={{ fontSize:11, color:'#6B6876' }}>Q{transcript.filter(m=>m.role==='ai').length}</div>
-          {punctuality != null && (
-            <div style={{ fontSize:10, color:punctuality<80?C.red:'#6B6876', marginTop:2 }}>
-              Punctuality: {punctuality}
+        <div style={{ padding:mobile?'10px 16px':'10px 24px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+          <button onClick={requestEnd} disabled={endingInterview}
+            style={{ padding:mobile?'8px 10px':'8px 16px', borderRadius:7, border:'1px solid rgba(255,79,79,0.3)', background:'rgba(255,79,79,0.08)', color:C.red, fontSize:mobile?11:13, cursor:endingInterview?'not-allowed':'pointer', whiteSpace:'nowrap', opacity:endingInterview?0.5:1 }}>
+            {mobile ? 'End' : 'End Interview'}
+          </button>
+
+          {/* Mic button */}
+          <div style={{ textAlign:'center', flex:1 }}>
+            <button
+              style={{ width:mobile?46:52, height:mobile?46:52, borderRadius:'50%', border:'none', cursor:aiStatus!=='idle'?'not-allowed':'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:mobile?19:21, transition:'all 0.2s', opacity:aiStatus!=='idle'?0.35:1, background:isListening?C.red:'#1A1A22', boxShadow:isListening?'0 0 0 8px rgba(255,79,79,0.15)':'none', margin:'0 auto' }}
+              onClick={isListening ? stopListening : startListening}
+              disabled={aiStatus !== 'idle'}
+              className={isListening ? 'mic-active' : ''}>
+              {isListening ? '⏹' : '🎙'}
+            </button>
+            <div style={{ fontSize:10, color:'#6B6876', marginTop:5 }}>
+              {aiStatus==='speaking' ? 'Wait for Aria...'
+               : aiStatus==='thinking' ? 'Aria is thinking...'
+               : isListening ? <strong style={{ color:'#EEEAE0' }}>Listening… pause to send</strong>
+               : 'Tap 🎙 to speak'}
             </div>
-          )}
-          {isRejoin && <div style={{ fontSize:9, color:C.amber, marginTop:2 }}>🔄 REJOINED</div>}
+          </div>
+
+          {/* Right: question counter + text toggle */}
+          <div style={{ textAlign:'right', minWidth:mobile?56:80 }}>
+            <div style={{ fontSize:11, color:'#6B6876' }}>Q{transcript.filter(m=>m.role==='ai').length}</div>
+            {punctuality != null && (
+              <div style={{ fontSize:10, color:punctuality<80?C.red:'#6B6876', marginTop:2 }}>
+                P:{punctuality}
+              </div>
+            )}
+            {/* Keyboard fallback toggle */}
+            <button
+              onClick={() => setShowTextInput(v => !v)}
+              title="Switch to text input"
+              style={{ marginTop:4, padding:'2px 8px', background:'transparent', border:`1px solid ${showTextInput?C.gold:'#333'}`, borderRadius:4, color:showTextInput?C.gold:'#555', fontSize:10, cursor:'pointer', fontFamily:'monospace' }}>
+              {showTextInput ? '⌨ ON' : '⌨'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
