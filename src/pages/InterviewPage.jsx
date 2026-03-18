@@ -118,6 +118,7 @@ export default function InterviewPage() {
   const [checks,           setChecks]            = useState({ camera:'pending', mic:'pending', attire:'pending', connection:'pending' });
   const [attire,           setAttire]            = useState(null);
   const [rejoinDetected,   setRejoinDetected]    = useState(false);
+  const [inviteHasResume,  setInviteHasResume]   = useState(false);
 
   // Interview state
   const [phase,            setPhase]             = useState('gate');
@@ -139,8 +140,9 @@ export default function InterviewPage() {
   const [ttsMuted,         setTtsMuted]          = useState(false);
   const [showEndConfirm,   setShowEndConfirm]    = useState(false);
   const [endingInterview,  setEndingInterview]   = useState(false);
-  const [retryAnswer,      setRetryAnswer]       = useState(null); // last failed answer
+  const [retryAnswer,      setRetryAnswer]       = useState(null);
   const [networkError,     setNetworkError]      = useState('');
+  const [startError,       setStartError]        = useState(''); // error during startInterview — shows retry not dead screen
 
   // Refs
   const videoRef      = useRef(null);
@@ -156,12 +158,14 @@ export default function InterviewPage() {
   const sessionRef    = useRef(null);
   const elapsedRef    = useRef(0);
   const sendingRef    = useRef(false); // prevents double-send race
+  const aiStatusRef   = useRef('idle'); // always current, prevents stale closure in mic guard
 
   // Keep refs in sync with state
   useEffect(() => { ttsMutedRef.current = ttsMuted; }, [ttsMuted]);
   useEffect(() => { sequenceRef.current = sequence; }, [sequence]);
   useEffect(() => { sessionRef.current  = sessionId; }, [sessionId]);
   useEffect(() => { elapsedRef.current  = elapsed; }, [elapsed]);
+  useEffect(() => { aiStatusRef.current = aiStatus; }, [aiStatus]);
 
   // ── Init
   useEffect(() => {
@@ -174,7 +178,10 @@ export default function InterviewPage() {
   // ── Validate invite
   useEffect(() => {
     api.invites.validate(token)
-      .then(r => setInvite(r.invite))
+      .then(r => {
+        setInvite(r.invite);
+        setInviteHasResume(!!r.has_resume);
+      })
       .catch(e => setError(e.message));
   }, [token]);
 
@@ -267,6 +274,13 @@ export default function InterviewPage() {
         const sc = await api.invites.getSession(token);
         if (sc?.session) {
           setRejoinDetected(true);
+          // If resume was already uploaded to this invite, skip the resume step
+          if (inviteHasResume) {
+            setGateStep('checks');
+            setVerifying(false);
+            beginChecks();
+            return;
+          }
           setGateStep('rejoin');
           setVerifying(false);
           return;
@@ -318,6 +332,8 @@ export default function InterviewPage() {
       } catch { setAttire({ score:75, level:'Business Casual', note:'Looking professional!' }); }
     }
     setChecks(p => ({...p, attire: 'pass', connection: 'pass'}));
+    // Ping the backend now so Railway wakes from sleep before the candidate clicks Begin
+    api.interview.warmup().catch(() => {});
     setGateStep('ready');
   };
 
@@ -326,10 +342,11 @@ export default function InterviewPage() {
   // ─────────────────────────────────────────────────────────
   const startInterview = async () => {
     setStartingInterview(true);
+    setStartError('');
     try {
       const res = await api.interview.start({ invite_token: token, candidate_name: candidateName });
 
-      // Sync all refs immediately
+      // Sync all refs immediately before any state flush
       sessionRef.current  = res.session_id;
       sequenceRef.current = res.is_rejoin ? (res.sequence || 2) : 2;
 
@@ -340,7 +357,7 @@ export default function InterviewPage() {
       setTranscript([{ role:'ai', text: res.ai_message }]);
       setAiText(res.ai_message);
 
-      // Switch phase AFTER data is ready
+      // Switch phase AFTER all data is ready
       setPhase('interview');
       setTimeout(() => {
         if (videoRef.current && streamRef.current) {
@@ -350,11 +367,16 @@ export default function InterviewPage() {
       }, 100);
 
       timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
+      aiStatusRef.current = 'speaking';
       setAiStatus('speaking');
-      speak(res.ai_message, () => setAiStatus('idle'), ttsMutedRef.current);
+      speak(res.ai_message, () => {
+        aiStatusRef.current = 'idle';
+        setAiStatus('idle');
+      }, ttsMutedRef.current);
     } catch (e) {
       setStartingInterview(false);
-      setError(e.message);
+      // Show retry button instead of a dead error page
+      setStartError(e.message || 'Could not connect to interview server. Please try again.');
     }
   };
 
@@ -375,6 +397,7 @@ export default function InterviewPage() {
     setSequence(seq + 2);
 
     setTranscript(p => [...p, { role:'candidate', text: answer }]);
+    aiStatusRef.current = 'thinking';
     setAiStatus('thinking');
     setMicError('');
     setNetworkError('');
@@ -384,12 +407,15 @@ export default function InterviewPage() {
       const res = await api.interview.message({ session_id: sid, candidate_answer: answer, sequence: seq });
       setTranscript(p => [...p, { role:'ai', text: res.ai_message }]);
       setAiText(res.ai_message);
+      aiStatusRef.current = 'speaking';
       setAiStatus('speaking');
       speak(res.ai_message, () => {
+        aiStatusRef.current = 'idle';
         setAiStatus('idle');
         if (res.is_complete) setTimeout(endInterviewDirect, 2000);
       }, ttsMutedRef.current);
     } catch (e) {
+      aiStatusRef.current = 'idle';
       setAiStatus('idle');
       // Rollback sequence so candidate can retry
       sequenceRef.current = seq;
@@ -403,7 +429,12 @@ export default function InterviewPage() {
   };
 
   // ─────────────────────────────────────────────────────────
-  // Microphone — continuous=true prevents Chrome auto-stopping
+  // Microphone — with silence auto-send (2.5s) and aiStatusRef guard
+  //
+  // Why continuous=true? Chrome Web Speech API auto-stops after
+  // ~3s of silence when continuous=false. With continuous=true it
+  // keeps recording. We add a silence timer: if no new speech for
+  // 2.5s AND we have text, we auto-stop and send.
   // ─────────────────────────────────────────────────────────
   const startListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -411,16 +442,35 @@ export default function InterviewPage() {
       setMicError('Voice input requires Google Chrome. Please open this link in Chrome.');
       return;
     }
-    if (aiStatus !== 'idle' || sendingRef.current) return;
+    // Use aiStatusRef (not aiStatus state) — avoids stale closure bug
+    if (aiStatusRef.current !== 'idle' || sendingRef.current) return;
 
     setMicError(''); setNetworkError(''); setRetryAnswer(null);
+
     const recog = new SR();
-    recog.continuous = true;      // KEY: prevents auto-stop after brief pauses
+    recog.continuous = true;
     recog.interimResults = true;
     recog.lang = 'en-IN';
     recog.maxAlternatives = 1;
 
     setIsListening(true); setInterim(''); lastAnswer.current = '';
+
+    // Silence timer — auto-stop 2.5s after last speech chunk
+    let silenceTimer = null;
+    const resetSilenceTimer = () => {
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        // Only auto-send if we have something captured
+        if (lastAnswer.current.trim().length > 2) {
+          recog.stop();
+        }
+      }, 2500);
+    };
+
+    recog.onstart = () => {
+      // Start silence timer from moment mic opens
+      resetSilenceTimer();
+    };
 
     recog.onresult = (e) => {
       let fin = '', intr = '';
@@ -428,26 +478,44 @@ export default function InterviewPage() {
         if (e.results[i].isFinal) fin += e.results[i][0].transcript + ' ';
         else intr += e.results[i][0].transcript;
       }
-      if (fin) { lastAnswer.current += fin; setInterim(lastAnswer.current.trim()); }
-      else { setInterim((lastAnswer.current + intr).trim()); }
+      if (fin) {
+        lastAnswer.current += fin;
+        setInterim(lastAnswer.current.trim());
+        resetSilenceTimer(); // reset on each final chunk
+      } else {
+        setInterim((lastAnswer.current + intr).trim());
+        if (intr) resetSilenceTimer(); // also reset on interim (user is still speaking)
+      }
     };
 
     recog.onend = () => {
+      clearTimeout(silenceTimer);
       setIsListening(false); setInterim('');
       const ans = lastAnswer.current.trim(); lastAnswer.current = '';
       if (ans.length > 2) sendAnswer(ans);
     };
 
     recog.onerror = (e) => {
+      clearTimeout(silenceTimer);
       console.error('Speech error:', e.error);
       setIsListening(false); setInterim('');
       const ans = lastAnswer.current.trim(); lastAnswer.current = '';
-      if (ans.length > 2) { sendAnswer(ans); }
-      else { setMicError(MIC_ERRORS[e.error] || `Mic error: ${e.error}. Please try again.`); }
+      if (ans.length > 2) {
+        sendAnswer(ans); // send whatever we captured before the error
+      } else if (e.error !== 'aborted') {
+        setMicError(MIC_ERRORS[e.error] || `Mic error: ${e.error}. Please try again.`);
+      }
     };
 
     recogRef.current = recog;
-    recog.start();
+    try {
+      recog.start();
+    } catch (startErr) {
+      // start() throws if called while another recognition is running
+      console.error('recog.start() threw:', startErr.message);
+      setIsListening(false);
+      setMicError('Microphone already in use. Please wait a moment and try again.');
+    }
   };
 
   const stopListening = () => recogRef.current?.stop();
@@ -642,10 +710,18 @@ export default function InterviewPage() {
           </div>
 
           {gateStep === 'ready' && !startingInterview && (
-            <button style={{ width:'100%', padding:14, background:allPass?C.gold:'#222', border:'none', borderRadius:10, fontFamily:"'Syne',sans-serif", fontSize:15, fontWeight:700, color:allPass?'#000':'#555', cursor:allPass?'pointer':'not-allowed' }}
-              onClick={startInterview} disabled={!allPass}>
-              {rejoinDetected ? 'Reconnect with Aria ✦' : 'Begin Interview with Aria ✦'}
-            </button>
+            <>
+              {startError && (
+                <div style={{ background:'rgba(255,79,79,0.1)', border:'1px solid rgba(255,79,79,0.3)', borderRadius:8, padding:'12px 14px', fontSize:13, color:'#FCA5A5', marginBottom:14, lineHeight:1.6 }}>
+                  ⚠️ {startError}<br/>
+                  <span style={{ fontSize:12, color:'#888', marginTop:4, display:'block' }}>The server may still be starting up. Please wait 10–15 seconds and try again.</span>
+                </div>
+              )}
+              <button style={{ width:'100%', padding:14, background:allPass?C.gold:'#222', border:'none', borderRadius:10, fontFamily:"'Syne',sans-serif", fontSize:15, fontWeight:700, color:allPass?'#000':'#555', cursor:allPass?'pointer':'not-allowed' }}
+                onClick={startInterview} disabled={!allPass}>
+                {startError ? 'Try Again →' : rejoinDetected ? 'Reconnect with Aria ✦' : 'Begin Interview with Aria ✦'}
+              </button>
+            </>
           )}
           {startingInterview && (
             <div style={{ padding:'20px 0', textAlign:'center' }}>
@@ -886,8 +962,8 @@ export default function InterviewPage() {
           <div style={{ fontSize:11, color:'#6B6876', marginTop:6 }}>
             {aiStatus==='speaking' ? 'Wait for Aria to finish...'
              : aiStatus==='thinking' ? 'Aria is thinking...'
-             : isListening ? <strong style={{ color:'#EEEAE0' }}>Tap ⏹ when done speaking</strong>
-             : 'Tap 🎙 to answer'}
+             : isListening ? <strong style={{ color:'#EEEAE0' }}>Speaking… tap ⏹ or pause to send</strong>
+             : 'Tap 🎙 then speak your answer'}
           </div>
         </div>
 
