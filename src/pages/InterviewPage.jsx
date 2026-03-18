@@ -159,6 +159,7 @@ export default function InterviewPage() {
   const elapsedRef    = useRef(0);
   const sendingRef    = useRef(false); // prevents double-send race
   const aiStatusRef   = useRef('idle'); // always current, prevents stale closure in mic guard
+  const stopListeningRef = useRef(null); // populated by startListening, called by stopListening
 
   // Keep refs in sync with state
   useEffect(() => { ttsMutedRef.current = ttsMuted; }, [ttsMuted]);
@@ -304,10 +305,10 @@ export default function InterviewPage() {
 
   const startCamera = async (ref) => {
     try {
-      const constraints = mobile
-        ? { video: { facingMode: 'user', width: 640, height: 480 }, audio: true }
-        : { video: true, audio: true };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // Video ONLY — no audio. Requesting audio here conflicts with Chrome's
+      // Web Speech API which needs exclusive mic access to Google's servers.
+      // The mic is tested separately by the speech recognition itself.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
       if (ref?.current) { ref.current.srcObject = stream; ref.current.play().catch(() => {}); }
       return stream;
@@ -315,6 +316,9 @@ export default function InterviewPage() {
   };
 
   const beginChecks = async () => {
+    // Fire warmup IMMEDIATELY so Railway starts waking while checks run (~5s total)
+    api.interview.warmup().catch(() => {});
+
     setChecks({ camera:'checking', mic:'pending', attire:'pending', connection:'pending' });
     const stream = await startCamera(gateVideoRef);
     setChecks(p => ({...p, camera: stream ? 'pass' : 'fail'}));
@@ -332,8 +336,6 @@ export default function InterviewPage() {
       } catch { setAttire({ score:75, level:'Business Casual', note:'Looking professional!' }); }
     }
     setChecks(p => ({...p, attire: 'pass', connection: 'pass'}));
-    // Ping the backend now so Railway wakes from sleep before the candidate clicks Begin
-    api.interview.warmup().catch(() => {});
     setGateStep('ready');
   };
 
@@ -429,96 +431,146 @@ export default function InterviewPage() {
   };
 
   // ─────────────────────────────────────────────────────────
-  // Microphone — with silence auto-send (2.5s) and aiStatusRef guard
-  //
-  // Why continuous=true? Chrome Web Speech API auto-stops after
-  // ~3s of silence when continuous=false. With continuous=true it
-  // keeps recording. We add a silence timer: if no new speech for
-  // 2.5s AND we have text, we auto-stop and send.
+  // Microphone — phrase-by-phrase restart with permission check
   // ─────────────────────────────────────────────────────────
-  const startListening = () => {
+  const startListening = async () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setMicError('Voice input requires Google Chrome. Please open this link in Chrome.');
       return;
     }
-    // Use aiStatusRef (not aiStatus state) — avoids stale closure bug
     if (aiStatusRef.current !== 'idle' || sendingRef.current) return;
 
     setMicError(''); setNetworkError(''); setRetryAnswer(null);
 
-    const recog = new SR();
-    recog.continuous = true;
-    recog.interimResults = true;
-    recog.lang = 'en-IN';
-    recog.maxAlternatives = 1;
+    // ── Step 1: verify mic permission explicitly before starting recognition.
+    // This surfaces a clear error if the mic is blocked or held by another app.
+    try {
+      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Release the test stream immediately — Web Speech API needs the mic free
+      testStream.getTracks().forEach(t => t.stop());
+    } catch (permErr) {
+      if (permErr.name === 'NotAllowedError') {
+        setMicError('Microphone access denied. Click the 🔒 or 🎙 icon in your browser address bar and allow microphone, then reload.');
+      } else if (permErr.name === 'NotFoundError') {
+        setMicError('No microphone found. Please connect one and try again.');
+      } else {
+        setMicError(`Microphone unavailable: ${permErr.message}. Check that no other app is using it.`);
+      }
+      return;
+    }
 
     setIsListening(true); setInterim(''); lastAnswer.current = '';
 
-    // Silence timer — auto-stop 2.5s after last speech chunk
-    let silenceTimer = null;
-    const resetSilenceTimer = () => {
-      clearTimeout(silenceTimer);
-      silenceTimer = setTimeout(() => {
-        // Only auto-send if we have something captured
+    const isActiveRef = { current: true };
+    let sendTimer = null;
+    let noSpeechCount = 0; // consecutive no-speech counter
+
+    const scheduleSend = () => {
+      clearTimeout(sendTimer);
+      sendTimer = setTimeout(() => {
         if (lastAnswer.current.trim().length > 2) {
-          recog.stop();
+          isActiveRef.current = false;
+          setIsListening(false);
+          setInterim('');
+          const ans = lastAnswer.current.trim();
+          lastAnswer.current = '';
+          sendAnswer(ans);
         }
       }, 2500);
     };
 
-    recog.onstart = () => {
-      // Start silence timer from moment mic opens
-      resetSilenceTimer();
+    const startOnePhrase = () => {
+      if (!isActiveRef.current) return;
+
+      const recog = new SR();
+      recog.continuous      = false;
+      recog.interimResults  = true;
+      recog.lang            = 'en-IN';
+      recog.maxAlternatives = 1;
+
+      recog.onresult = (e) => {
+        noSpeechCount = 0; // reset on any result
+        let fin = '', intr = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) fin += e.results[i][0].transcript + ' ';
+          else intr += e.results[i][0].transcript;
+        }
+        if (fin) {
+          lastAnswer.current += fin;
+          setInterim(lastAnswer.current.trim());
+          scheduleSend();
+        } else {
+          setInterim((lastAnswer.current + intr).trim());
+        }
+      };
+
+      recog.onend = () => {
+        if (isActiveRef.current) setTimeout(startOnePhrase, 150);
+      };
+
+      recog.onerror = (e) => {
+        console.warn('Speech error:', e.error, '| captured:', JSON.stringify(lastAnswer.current));
+
+        if (e.error === 'no-speech') {
+          noSpeechCount++;
+          // After 6 consecutive silent phrases (~9s), stop and tell the user
+          if (noSpeechCount >= 6) {
+            isActiveRef.current = false;
+            clearTimeout(sendTimer);
+            setIsListening(false); setInterim('');
+            setMicError(
+              'Your microphone is not picking up any audio. Please check:\n' +
+              '1. Mic is not muted (check keyboard mute key)\n' +
+              '2. Correct mic is selected — click 🔒 in address bar → Microphone\n' +
+              '3. No other app (Zoom, Teams, Meet) is holding the mic\n' +
+              '4. Try refreshing the page'
+            );
+            return;
+          }
+          if (isActiveRef.current) setTimeout(startOnePhrase, 300);
+          return;
+        }
+
+        if (e.error === 'aborted') return;
+
+        // Network or other real error
+        isActiveRef.current = false;
+        clearTimeout(sendTimer);
+        setIsListening(false); setInterim('');
+        const ans = lastAnswer.current.trim(); lastAnswer.current = '';
+        if (ans.length > 2) {
+          sendAnswer(ans);
+        } else {
+          setMicError(MIC_ERRORS[e.error] || `Mic error (${e.error}). Please try again.`);
+        }
+      };
+
+      recogRef.current = recog;
+      try {
+        recog.start();
+      } catch (err) {
+        console.error('recog.start():', err.message);
+        if (isActiveRef.current) setTimeout(startOnePhrase, 400);
+      }
     };
 
-    recog.onresult = (e) => {
-      let fin = '', intr = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) fin += e.results[i][0].transcript + ' ';
-        else intr += e.results[i][0].transcript;
-      }
-      if (fin) {
-        lastAnswer.current += fin;
-        setInterim(lastAnswer.current.trim());
-        resetSilenceTimer(); // reset on each final chunk
-      } else {
-        setInterim((lastAnswer.current + intr).trim());
-        if (intr) resetSilenceTimer(); // also reset on interim (user is still speaking)
-      }
-    };
+    startOnePhrase();
 
-    recog.onend = () => {
-      clearTimeout(silenceTimer);
+    stopListeningRef.current = () => {
+      isActiveRef.current = false;
+      clearTimeout(sendTimer);
+      recogRef.current?.stop();
+      recogRef.current?.abort();
       setIsListening(false); setInterim('');
       const ans = lastAnswer.current.trim(); lastAnswer.current = '';
       if (ans.length > 2) sendAnswer(ans);
     };
-
-    recog.onerror = (e) => {
-      clearTimeout(silenceTimer);
-      console.error('Speech error:', e.error);
-      setIsListening(false); setInterim('');
-      const ans = lastAnswer.current.trim(); lastAnswer.current = '';
-      if (ans.length > 2) {
-        sendAnswer(ans); // send whatever we captured before the error
-      } else if (e.error !== 'aborted') {
-        setMicError(MIC_ERRORS[e.error] || `Mic error: ${e.error}. Please try again.`);
-      }
-    };
-
-    recogRef.current = recog;
-    try {
-      recog.start();
-    } catch (startErr) {
-      // start() throws if called while another recognition is running
-      console.error('recog.start() threw:', startErr.message);
-      setIsListening(false);
-      setMicError('Microphone already in use. Please wait a moment and try again.');
-    }
   };
 
-  const stopListening = () => recogRef.current?.stop();
+  const stopListening = () => {
+    if (stopListeningRef.current) stopListeningRef.current();
+  };
 
   // ─────────────────────────────────────────────────────────
   // End interview
@@ -645,7 +697,15 @@ export default function InterviewPage() {
             ✓ Duration: ~<strong style={{ color:'#EEEAE0' }}>{invite?.jobs?.interview_configs?.duration_minutes || 45} minutes</strong>
           </div>
           <button style={{ width:'100%', padding:14, background:C.gold, border:'none', borderRadius:10, fontFamily:"'Syne',sans-serif", fontSize:15, fontWeight:700, color:'#000', cursor:'pointer' }}
-            onClick={() => setGateStep('resume')}>Continue →</button>
+            onClick={() => {
+              if (inviteHasResume) {
+                // Resume already uploaded — skip straight to checks
+                setGateStep('checks');
+                beginChecks();
+              } else {
+                setGateStep('resume');
+              }
+            }}>Continue →</button>
         </>}
 
         {/* RESUME */}
@@ -921,9 +981,9 @@ export default function InterviewPage() {
 
       {/* Mic error */}
       {micError && (
-        <div style={{ margin:'4px 10px 0', padding:'8px 14px', background:'rgba(255,79,79,0.08)', border:'1px solid rgba(255,79,79,0.3)', borderRadius:8, fontSize:12, color:'#FCA5A5', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-          <span>⚠ {micError}</span>
-          <button onClick={() => setMicError('')} style={{ background:'none', border:'none', color:'#FCA5A5', cursor:'pointer', fontSize:18, lineHeight:1 }}>×</button>
+        <div style={{ margin:'4px 10px 0', padding:'10px 14px', background:'rgba(255,79,79,0.08)', border:'1px solid rgba(255,79,79,0.3)', borderRadius:8, fontSize:12, color:'#FCA5A5', display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexShrink:0, gap:10 }}>
+          <span style={{ whiteSpace:'pre-line', lineHeight:1.7 }}>⚠ {micError}</span>
+          <button onClick={() => setMicError('')} style={{ background:'none', border:'none', color:'#FCA5A5', cursor:'pointer', fontSize:18, lineHeight:1, flexShrink:0 }}>×</button>
         </div>
       )}
 
