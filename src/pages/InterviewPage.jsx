@@ -114,6 +114,7 @@ export default function InterviewPage() {
   const [verifying,        setVerifying]         = useState(false);
   const [candidateName,    setCandidateName]     = useState('');
   const [resumeFile,       setResumeFile]        = useState(null);
+  const [resumeText,       setResumeText]        = useState('');   // paste-text resume content
   const [resumeUploading,  setResumeUploading]   = useState(false);
   const [checks,           setChecks]            = useState({ camera:'pending', mic:'pending', attire:'pending', connection:'pending' });
   const [attire,           setAttire]            = useState(null);
@@ -143,7 +144,7 @@ export default function InterviewPage() {
   const [retryAnswer,      setRetryAnswer]       = useState(null);
   const [networkError,     setNetworkError]      = useState('');
   const [startError,       setStartError]        = useState('');
-  const [showTextInput,    setShowTextInput]     = useState(false); // fallback text input
+  const [showTextInput,    setShowTextInput]     = useState(true);  // visible by default — voice is unreliable across networks
   const [textInput,        setTextInput]         = useState('');
 
   // Refs
@@ -714,31 +715,40 @@ export default function InterviewPage() {
         {/* RESUME */}
         {gateStep === 'resume' && <>
           <div style={{ fontFamily:"'Syne',sans-serif", fontSize:mobile?20:22, fontWeight:800, color:'#EEEAE0', marginBottom:8 }}>
-            {rejoinDetected ? 'Re-upload Resume 🔄' : 'Upload Resume 📄'}
+            {rejoinDetected ? 'Re-share Resume 🔄' : 'Share Your Resume 📄'}
           </div>
-          <div style={{ color:'#6B6876', fontSize:13, marginBottom:20, lineHeight:1.6 }}>
-            {rejoinDetected
-              ? 'Re-upload your resume so Aria can continue with full context.'
-              : 'Aria will ask personalised questions based on your resume.'}
+          <div style={{ color:'#6B6876', fontSize:13, marginBottom:16, lineHeight:1.6 }}>
+            Paste your resume text below — Aria will ask personalised questions based on it.
           </div>
-          <div onClick={() => document.getElementById('resume-file').click()}
-            style={{ border:resumeFile?'2px solid rgba(46,204,138,0.5)':'2px dashed #333', borderRadius:12, padding:'28px 16px', textAlign:'center', cursor:'pointer', background:resumeFile?'rgba(46,204,138,0.05)':'#141419', marginBottom:16 }}>
-            <div style={{ fontSize:32, marginBottom:10 }}>{resumeFile ? '✅' : '📂'}</div>
-            <div style={{ fontSize:13, color:resumeFile ? C.green : '#6B6876' }}>
-              {resumeFile ? resumeFile.name : 'Tap to upload (.pdf, .txt, .doc)'}
-            </div>
-          </div>
-          <input id="resume-file" type="file" accept=".pdf,.txt,.doc,.docx" style={{ display:'none' }}
-            onChange={e => setResumeFile(e.target.files[0])} />
+
+          {/* Text paste area — PRIMARY method */}
+          <textarea
+            style={{ width:'100%', background:'#141419', border:'1px solid #444', borderRadius:10, padding:'12px 14px', color:'#EEEAE0', fontSize:13, fontFamily:'inherit', lineHeight:1.6, resize:'vertical', outline:'none', marginBottom:12, boxSizing:'border-box' }}
+            rows={6}
+            placeholder={'Paste your resume / CV text here...\n\nTip: Open your PDF, select all text (Ctrl+A), copy (Ctrl+C) and paste here.'}
+            value={resumeText}
+            onChange={e => setResumeText(e.target.value)}
+          />
+
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
             <button
-              style={{ padding:13, background:resumeFile&&!resumeUploading?C.gold:'#222', border:'none', borderRadius:10, fontFamily:"'Syne',sans-serif", fontSize:14, fontWeight:700, color:resumeFile&&!resumeUploading?'#000':'#555', cursor:resumeFile&&!resumeUploading?'pointer':'not-allowed' }}
-              onClick={handleResumeUpload} disabled={!resumeFile||resumeUploading}>
-              {resumeUploading ? 'Uploading...' : rejoinDetected ? 'Upload & Reconnect →' : 'Upload & Continue →'}
+              style={{ padding:13, background:resumeText.trim()&&!resumeUploading?C.gold:'#222', border:'none', borderRadius:10, fontFamily:"'Syne',sans-serif", fontSize:14, fontWeight:700, color:resumeText.trim()&&!resumeUploading?'#000':'#555', cursor:resumeText.trim()&&!resumeUploading?'pointer':'not-allowed' }}
+              onClick={async () => {
+                if (!resumeText.trim()) return;
+                setResumeUploading(true);
+                try {
+                  await api.interview.uploadResume({ invite_token: token, resume_text: resumeText.trim() });
+                } catch { /* silent */ }
+                setResumeUploading(false);
+                setGateStep('checks');
+                beginChecks();
+              }}
+              disabled={!resumeText.trim() || resumeUploading}>
+              {resumeUploading ? 'Saving...' : rejoinDetected ? 'Save & Reconnect →' : 'Save & Continue →'}
             </button>
             <button style={{ padding:11, background:'transparent', border:'1px solid #333', borderRadius:10, color:'#6B6876', fontSize:13, cursor:'pointer' }}
               onClick={() => { setGateStep('checks'); beginChecks(); }}>
-              {rejoinDetected ? 'Continue without re-uploading' : 'Skip — interview without resume'}
+              {rejoinDetected ? 'Continue without resume' : 'Skip — interview without resume'}
             </button>
           </div>
         </>}
@@ -1010,72 +1020,61 @@ export default function InterviewPage() {
       {/* ── BOTTOM BAR */}
       <div style={{ borderTop:'1px solid #ffffff0C', background:'rgba(6,6,10,0.97)', flexShrink:0 }}>
 
-        {/* Text input fallback */}
-        {showTextInput && (
-          <div style={{ padding:'10px 16px', borderBottom:'1px solid #ffffff0C', display:'flex', gap:8 }}>
-            <input
-              style={{ flex:1, background:'#1A1A22', border:'1px solid #333', borderRadius:8, padding:'10px 14px', color:'#EEEAE0', fontSize:14, fontFamily:'inherit', outline:'none' }}
-              placeholder="Type your answer here..."
-              value={textInput}
-              onChange={e => setTextInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey && textInput.trim()) {
-                  e.preventDefault();
-                  const ans = textInput.trim();
-                  setTextInput('');
-                  sendAnswer(ans);
-                }
-              }}
-              disabled={aiStatus !== 'idle'}
-              autoFocus
-            />
+        {/* Text input — always visible, primary way to respond */}
+        <div style={{ padding:'10px 12px', borderBottom:'1px solid #ffffff0C', display:'flex', gap:8, alignItems:'flex-end' }}>
+          <textarea
+            rows={2}
+            style={{ flex:1, background:'#1A1A22', border:`1px solid ${aiStatus==='idle'?'#444':'#333'}`, borderRadius:8, padding:'10px 12px', color:'#EEEAE0', fontSize:13, fontFamily:'inherit', outline:'none', resize:'none', lineHeight:1.5, opacity:aiStatus!=='idle'?0.5:1 }}
+            placeholder={aiStatus==='speaking' ? 'Wait for Aria to finish...' : aiStatus==='thinking' ? 'Aria is thinking...' : 'Type your answer here, then press Enter or Send →'}
+            value={textInput}
+            onChange={e => setTextInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey && textInput.trim() && aiStatus === 'idle') {
+                e.preventDefault();
+                const ans = textInput.trim();
+                setTextInput('');
+                sendAnswer(ans);
+              }
+            }}
+            disabled={aiStatus !== 'idle'}
+          />
+          <div style={{ display:'flex', flexDirection:'column', gap:6, flexShrink:0 }}>
             <button
-              onClick={() => { if (textInput.trim()) { const ans=textInput.trim(); setTextInput(''); sendAnswer(ans); } }}
+              onClick={() => { if (textInput.trim() && aiStatus === 'idle') { const ans=textInput.trim(); setTextInput(''); sendAnswer(ans); } }}
               disabled={aiStatus !== 'idle' || !textInput.trim()}
-              style={{ padding:'10px 18px', background:textInput.trim()&&aiStatus==='idle'?C.gold:'#222', border:'none', borderRadius:8, color:textInput.trim()&&aiStatus==='idle'?'#000':'#555', fontWeight:700, fontSize:14, cursor:textInput.trim()&&aiStatus==='idle'?'pointer':'not-allowed', fontFamily:"'Syne',sans-serif", whiteSpace:'nowrap' }}>
+              style={{ padding:'9px 16px', background:textInput.trim()&&aiStatus==='idle'?C.gold:'#222', border:'none', borderRadius:8, color:textInput.trim()&&aiStatus==='idle'?'#000':'#555', fontWeight:700, fontSize:13, cursor:textInput.trim()&&aiStatus==='idle'?'pointer':'not-allowed', fontFamily:"'Syne',sans-serif", whiteSpace:'nowrap' }}>
               Send →
             </button>
-          </div>
-        )}
-
-        <div style={{ padding:mobile?'10px 16px':'10px 24px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
-          <button onClick={requestEnd} disabled={endingInterview}
-            style={{ padding:mobile?'8px 10px':'8px 16px', borderRadius:7, border:'1px solid rgba(255,79,79,0.3)', background:'rgba(255,79,79,0.08)', color:C.red, fontSize:mobile?11:13, cursor:endingInterview?'not-allowed':'pointer', whiteSpace:'nowrap', opacity:endingInterview?0.5:1 }}>
-            {mobile ? 'End' : 'End Interview'}
-          </button>
-
-          {/* Mic button */}
-          <div style={{ textAlign:'center', flex:1 }}>
+            {/* Mic button — secondary, for voice input */}
             <button
-              style={{ width:mobile?46:52, height:mobile?46:52, borderRadius:'50%', border:'none', cursor:aiStatus!=='idle'?'not-allowed':'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:mobile?19:21, transition:'all 0.2s', opacity:aiStatus!=='idle'?0.35:1, background:isListening?C.red:'#1A1A22', boxShadow:isListening?'0 0 0 8px rgba(255,79,79,0.15)':'none', margin:'0 auto' }}
+              style={{ padding:'8px', borderRadius:8, border:'1px solid', borderColor:isListening?C.red:'#333', cursor:aiStatus!=='idle'?'not-allowed':'pointer', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, transition:'all 0.2s', opacity:aiStatus!=='idle'?0.35:1, background:isListening?'rgba(255,79,79,0.15)':'transparent' }}
               onClick={isListening ? stopListening : startListening}
               disabled={aiStatus !== 'idle'}
+              title={isListening ? 'Stop recording' : 'Speak your answer'}
               className={isListening ? 'mic-active' : ''}>
               {isListening ? '⏹' : '🎙'}
             </button>
-            <div style={{ fontSize:10, color:'#6B6876', marginTop:5 }}>
-              {aiStatus==='speaking' ? 'Wait for Aria...'
-               : aiStatus==='thinking' ? 'Aria is thinking...'
-               : isListening ? <strong style={{ color:'#EEEAE0' }}>Listening… pause to send</strong>
-               : 'Tap 🎙 to speak'}
-            </div>
+          </div>
+        </div>
+
+        {/* Status bar */}
+        <div style={{ padding:mobile?'8px 12px':'8px 20px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+          <button onClick={requestEnd} disabled={endingInterview}
+            style={{ padding:mobile?'6px 10px':'6px 14px', borderRadius:7, border:'1px solid rgba(255,79,79,0.3)', background:'rgba(255,79,79,0.08)', color:C.red, fontSize:mobile?11:12, cursor:endingInterview?'not-allowed':'pointer', whiteSpace:'nowrap', opacity:endingInterview?0.5:1 }}>
+            {mobile ? 'End' : 'End Interview'}
+          </button>
+
+          <div style={{ fontSize:11, color:'#6B6876', textAlign:'center', flex:1 }}>
+            {aiStatus==='speaking' ? <span style={{ color:C.purple }}>🔊 Aria is speaking…</span>
+             : aiStatus==='thinking' ? <span style={{ color:C.amber }}>⟳ Aria is thinking…</span>
+             : isListening ? <strong style={{ color:C.red }}>● Recording… pause to auto-send</strong>
+             : <span>Type above or tap 🎙 to speak</span>}
           </div>
 
-          {/* Right: question counter + text toggle */}
-          <div style={{ textAlign:'right', minWidth:mobile?56:80 }}>
+          <div style={{ textAlign:'right', minWidth:mobile?50:70, flexShrink:0 }}>
             <div style={{ fontSize:11, color:'#6B6876' }}>Q{transcript.filter(m=>m.role==='ai').length}</div>
-            {punctuality != null && (
-              <div style={{ fontSize:10, color:punctuality<80?C.red:'#6B6876', marginTop:2 }}>
-                P:{punctuality}
-              </div>
-            )}
-            {/* Keyboard fallback toggle */}
-            <button
-              onClick={() => setShowTextInput(v => !v)}
-              title="Switch to text input"
-              style={{ marginTop:4, padding:'2px 8px', background:'transparent', border:`1px solid ${showTextInput?C.gold:'#333'}`, borderRadius:4, color:showTextInput?C.gold:'#555', fontSize:10, cursor:'pointer', fontFamily:'monospace' }}>
-              {showTextInput ? '⌨ ON' : '⌨'}
-            </button>
+            {punctuality != null && <div style={{ fontSize:10, color:punctuality<80?C.red:'#555', marginTop:1 }}>P:{punctuality}</div>}
+            {isRejoin && <div style={{ fontSize:9, color:C.amber, marginTop:1 }}>REJOIN</div>}
           </div>
         </div>
       </div>
