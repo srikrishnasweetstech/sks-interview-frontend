@@ -66,6 +66,7 @@ export const api = {
     attire:       (body) => request('/api/interview/attire',        { method: 'POST', body }),
     complete:     (body) => request('/api/interview/complete',      { method: 'POST', body }),
     uploadResume: (body) => request('/api/interview/upload-resume', { method: 'POST', body }),
+    keepalive:    (body) => request('/api/interview/keepalive',     { method: 'POST', body }),
   },
   dashboard: {
     stats: () => request('/api/dashboard/stats'),
