@@ -64,6 +64,15 @@ export default function SessionPage() {
                 {RECO_MAP[session.recommendation]?.label}
               </span>
             )}
+            {session.status === 'completed' && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => window.open(`${import.meta.env.VITE_API_URL}/api/reports/${session.id}?token=${localStorage.getItem('sks_token')}`, '_blank')}
+                title="Open printable report (use browser Print → Save as PDF)"
+              >
+                🖨️ Print Report
+              </button>
+            )}
           </div>
         </div>
 
