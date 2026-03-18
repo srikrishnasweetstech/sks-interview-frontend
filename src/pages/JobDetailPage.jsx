@@ -34,6 +34,9 @@ export default function JobDetailPage() {
   const [pauseConfirm, setPauseConfirm] = useState(null);
   const [pausing, setPausing]       = useState(false);
 
+  const [inviteEmailSent, setInviteEmailSent]   = useState(false);
+  const [inviteEmailError, setInviteEmailError] = useState('');
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500); };
 
   const loadJob = async () => {
@@ -132,6 +135,8 @@ export default function JobDetailPage() {
         duration_minutes: inviteForm.duration_minutes || 45,
       });
       setInviteLink(result.interview_url);
+      setInviteEmailSent(result.email_sent || false);
+      setInviteEmailError(result.email_error || '');
       loadJob();
     } catch (e) {
       showToast(e.message);
@@ -396,32 +401,57 @@ export default function JobDetailPage() {
               </form>
             ) : (
               <div>
-                <div style={{ background:'var(--green-bg)', border:'1px solid #BBF7D0', borderRadius:8, padding:'12px 16px', marginBottom:20 }}>
-                  <div style={{ fontSize:13, fontWeight:700, color:'var(--green-text)', marginBottom:4 }}>✓ Invite link ready</div>
-                  <div style={{ fontSize:12, color:'var(--green-text)' }}>Share this link with {inviteForm.full_name}</div>
-                </div>
+                {/* Email status banner */}
+                {inviteEmailSent ? (
+                  <div style={{ background:'var(--green-bg)', border:'1px solid #BBF7D0', borderRadius:8, padding:'12px 16px', marginBottom:20 }}>
+                    <div style={{ fontSize:13, fontWeight:700, color:'var(--green-text)', marginBottom:2 }}>✅ Email sent to {inviteForm.email}</div>
+                    <div style={{ fontSize:12, color:'var(--green-text)' }}>Invite link delivered. Candidate can also use the link below.</div>
+                  </div>
+                ) : (
+                  <div style={{ background:'var(--amber-bg)', border:'1px solid #FDE68A', borderRadius:8, padding:'12px 16px', marginBottom:20 }}>
+                    <div style={{ fontSize:13, fontWeight:700, color:'var(--amber-text)', marginBottom:2 }}>
+                      ⚠️ Email not sent automatically
+                    </div>
+                    <div style={{ fontSize:12, color:'var(--amber-text)', lineHeight:1.5 }}>
+                      {inviteEmailError
+                        ? `Reason: ${inviteEmailError}. `
+                        : 'Email service may not be configured. '}
+                      Share the link below manually using Gmail, WhatsApp, or copy it.
+                    </div>
+                  </div>
+                )}
 
+                {/* Interview link */}
                 <div style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:8, padding:'12px 14px', marginBottom:16, fontFamily:'DM Mono,monospace', fontSize:12, color:'var(--text)', wordBreak:'break-all', lineHeight:1.6 }}>
                   {inviteLink}
                 </div>
 
-                <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+                {/* Action buttons */}
+                <div style={{ display:'flex', gap:8, marginBottom:12, flexWrap:'wrap' }}>
                   <button className="btn btn-primary" style={{ flex:1 }}
                     onClick={() => { navigator.clipboard.writeText(inviteLink); showToast('✓ Link copied to clipboard!'); }}>
                     📋 Copy Link
                   </button>
+                  {/* Gmail compose — pre-fills subject and body */}
+                  <a
+                    href={`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(inviteForm.email)}&su=${encodeURIComponent(`Interview Invite: ${job?.title} at SriKrishnaSweets`)}&body=${encodeURIComponent(`Hi ${inviteForm.full_name},\n\nYou've been invited to interview for the ${job?.title} position at SriKrishnaSweets.\n\nPlease use the link below to begin your interview:\n${inviteLink}\n\nThe interview is conducted by Aria, our AI interviewer, and takes approximately ${inviteForm.duration_minutes || 45} minutes. Use Google Chrome, have your camera & mic ready.\n\nBest regards,\nSriKrishnaSweets HR Team`)}`}
+                    target="_blank" rel="noreferrer"
+                    className="btn btn-ghost"
+                    style={{ display:'inline-flex', alignItems:'center', gap:6, textDecoration:'none' }}>
+                    ✉️ Open in Gmail
+                  </a>
                   <button className="btn btn-ghost"
-                    onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent('Your interview link: ' + inviteLink)}`, '_blank')}>
+                    onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(`Hi ${inviteForm.full_name}, you have been invited to interview for ${job?.title} at SriKrishnaSweets. Please use this link to begin: ${inviteLink}`)}`, '_blank')}>
                     WhatsApp
                   </button>
                 </div>
 
-                <div style={{ fontSize:12, color:'var(--muted)', marginBottom:20 }}>
-                  Link expires in 48 hours. Candidate must complete the interview before it expires.
+                <div style={{ fontSize:12, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
+                  Link expires in 48 hours. Candidate must verify their email before entering.
                 </div>
 
                 <button className="btn btn-ghost" style={{ width:'100%' }}
-                  onClick={() => { setShowInvite(false); setInviteLink(''); setInviteForm({ full_name:'', email:'' }); }}>
+                  onClick={() => { setShowInvite(false); setInviteLink(''); setInviteEmailSent(false); setInviteEmailError(''); setInviteForm({ full_name:'', email:'', scheduled_at:'', duration_minutes:45 }); }}>
                   Done
                 </button>
               </div>
