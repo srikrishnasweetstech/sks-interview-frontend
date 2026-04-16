@@ -1,5 +1,4 @@
-const BASE = import.meta.env.VITE_BACKEND_URL;
-
+const BASE = import.meta.env.VITE_BACKEND_URL || 'https://web-production-d4dfd.up.railway.app';
 function getToken() {
   return localStorage.getItem('sks_token');
 }
